@@ -1,0 +1,9 @@
+.venv
+.env
+.cursor
+/notes/*.txt
+/archive/*
+__pycache__/
+/data/*.csv
+/models/*.pkl
+/models/*.h5
