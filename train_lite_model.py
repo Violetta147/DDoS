@@ -125,19 +125,22 @@ def main() -> None:
     raw_x, y, selected_features = load_and_clean(CSV_PATH, base_features)
     print(f"Debug: Selected features: {selected_features}")
 
-    scaler = StandardScaler()
-    x_scaled = scaler.fit_transform(raw_x)
-    feature_count = x_scaled.shape[1]
-    x_reshaped = x_scaled.reshape(-1, feature_count, 1)
-
-    x_train, x_val, y_train, y_val = train_test_split(
-        x_reshaped,
+    x_train_raw, x_val_raw, y_train, y_val = train_test_split(
+        raw_x,
         y,
         test_size=TEST_SIZE,
         random_state=RANDOM_STATE,
         stratify=y,
         shuffle=True,
     )
+
+    scaler = StandardScaler()
+    x_train_scaled = scaler.fit_transform(x_train_raw)
+    x_val_scaled = scaler.transform(x_val_raw)
+
+    feature_count = x_train_scaled.shape[1]
+    x_train = x_train_scaled.reshape(-1, feature_count, 1)
+    x_val = x_val_scaled.reshape(-1, feature_count, 1)
 
     model = build_model(feature_count)
     print("Debug: Starting training")
