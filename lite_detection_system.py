@@ -100,27 +100,66 @@ class CSVAppendHandler(FileSystemEventHandler):
         self.csv_path = csv_path
         self.offset = 0
         self.process_fn = process_fn
+        self.file_size = 0
 
     def on_modified(self, event):
         if event.src_path != os.path.abspath(self.csv_path):
             return
+        
+        # Kiểm tra nếu file bị truncate/recreate (size giảm)
+        try:
+            current_size = os.path.getsize(self.csv_path)
+            if current_size < self.file_size:
+                # File bị recreate, reset offset
+                print(f"Debug: CSV file recreated (size: {self.file_size} -> {current_size}), resetting offset")
+                self.offset = 0
+            self.file_size = current_size
+        except Exception:
+            pass
+        
         self._process_new_lines()
 
     def on_created(self, event):
         if event.src_path != os.path.abspath(self.csv_path):
             return
+        print("Debug: CSV file created, resetting offset")
         self.offset = 0
-        self._process_new_lines()
+        self.file_size = 0
+        # Không process ngay khi file được tạo (chờ có data)
 
     def _process_new_lines(self):
-        with open(self.csv_path, "r", encoding="utf-8", errors="ignore") as f:
-            f.seek(self.offset)
-            new_data = f.read()
-            self.offset = f.tell()
-        if not new_data.strip():
-            return
-        lines = [l for l in new_data.splitlines() if l.strip()]
-        self.process_fn(lines)
+        try:
+            # Kiểm tra file size trước
+            try:
+                current_size = os.path.getsize(self.csv_path)
+            except Exception:
+                return
+            
+            # Nếu offset lớn hơn file size, file đã bị recreate
+            if self.offset > current_size:
+                print(f"Debug: Offset ({self.offset}) > file size ({current_size}), file recreated. Resetting offset.")
+                self.offset = 0
+            
+            with open(self.csv_path, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(self.offset)
+                new_data = f.read()
+                new_offset = f.tell()
+                
+                # Nếu không đọc được gì mới, return
+                if new_offset == self.offset:
+                    return
+                
+                self.offset = new_offset
+            
+            if not new_data.strip():
+                return
+            
+            lines = [l for l in new_data.splitlines() if l.strip()]
+            if lines:
+                print(f"Debug: Read {len(lines)} new line(s) from CSV (offset: {self.offset})")
+            self.process_fn(lines)
+        except Exception as e:
+            print(f"⚠️ Error reading CSV: {e}")
 
 
 # %%
@@ -134,38 +173,75 @@ def run_watcher(csv_path: str, batch_size: int, poll: bool, model, scaler, featu
         nonlocal buffer
         for line in lines:
             buffer.append(line)
-            if len(buffer) >= batch_size:
-                flush_buffer()
+        
+        # Flush khi buffer đủ batch_size hoặc khi có nhiều dòng mới
+        # (để xử lý batch hiệu quả hơn)
+        if len(buffer) >= batch_size:
+            flush_buffer()
 
     def flush_buffer():
         nonlocal buffer
         if not buffer:
             return
+        
+        # Lưu buffer hiện tại và clear ngay để tránh duplicate processing
+        local_lines = buffer.copy()
+        buffer = []
+        
+        if not local_lines:
+            return
+            
         try:
+            # Đọc header từ CSV file một lần
             header_df = pd.read_csv(csv_path, nrows=0)
             header_first_col = header_df.columns[0]
-            local_lines = buffer
+            
+            # Loại bỏ header nếu có trong buffer
             if local_lines and local_lines[0].split(",")[0].strip() == header_first_col:
                 local_lines = local_lines[1:]
+            
             if not local_lines:
-                buffer = []
                 return
 
+            # Parse tất cả dòng trong buffer cùng lúc
             df_new = pd.read_csv(StringIO("\n".join(local_lines)), header=None)
+            
+            # Kiểm tra số cột có khớp với header không
+            if len(df_new.columns) != len(header_df.columns):
+                print(f"⚠️ Column mismatch: Expected {len(header_df.columns)} cols, got {len(df_new.columns)}. Skipping batch.")
+                return
+            
             df_new.columns = header_df.columns
+            
+            # Debug: In số lượng flows được xử lý
+            num_flows = len(df_new)
+            if num_flows > 0:
+                print(f"Debug: Processing {num_flows} flow(s) in batch")
+            
+            # Predict tất cả flows cùng lúc (batch inference)
             preds, proba = infer_dataframe(df_new)
-            total_fwd = df_new["Total Fwd Packets"].to_numpy()
+            
+            # Xử lý từng flow trong batch
             for i, p in enumerate(preds):
+                # Lấy số gói tin từ dataframe
+                pkt_count = df_new.iloc[i]['Total Fwd Packets']
                 is_ai = p == 1
-                is_rule = p == 0 and total_fwd[i] > 1000
-                if is_ai or is_rule:
-                    reason = "AI Model" if is_ai else f"High Rate Rule ({total_fwd[i]:.0f} pkts)"
-                    print(f"{Fore.RED}🚨 DDoS DETECTED! proba={proba[i]:.4f} reason={reason}{Style.RESET_ALL}")
+                
+                if is_ai:
+                    # Nếu AI phát hiện (proba > 0.5)
+                    print(f"{Fore.RED}🚨 DDoS DETECTED! (AI Model) - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
                 else:
-                    print(f"{Fore.GREEN}✅ Normal{Style.RESET_ALL} proba={proba[i]:.4f}")
+                    # Nếu AI không phát hiện, kiểm tra lưu lượng
+                    if pkt_count > 2000:
+                        # Lưu lượng cao bất thường nhưng AI bỏ sót -> Cảnh báo VÀNG
+                        print(f"{Fore.YELLOW}⚠️ Normal? (AI Missed) - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
+                    else:
+                        # Lưu lượng thấp, AI báo Normal -> Mọi thứ ổn
+                        print(f"{Fore.GREEN}✅ Normal - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
         except Exception as exc:  # noqa: BLE001
-            print(f"⚠️ Ignored bad lines ({exc})")
-        buffer = []
+            print(f"⚠️ Error processing batch ({len(local_lines)} lines): {exc}")
+            import traceback
+            traceback.print_exc()
 
     def infer_dataframe(df_chunk: pd.DataFrame):
         df_proc = rigid_preprocess_lite(df_chunk, feature_names, scaler)
@@ -174,16 +250,30 @@ def run_watcher(csv_path: str, batch_size: int, poll: bool, model, scaler, featu
     if poll or not HAS_WATCHDOG:
         print("Debug: Running in polling mode (watchdog unavailable or poll=True)")
         offset = 0
+        last_size = 0
         while True:
             if os.path.exists(csv_path):
-                size = os.path.getsize(csv_path)
-                if size > offset:
-                    with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                        f.seek(offset)
-                        new_data = f.read()
-                        offset = f.tell()
-                    lines = [l for l in new_data.splitlines() if l.strip()]
-                    process_lines(lines)
+                try:
+                    current_size = os.path.getsize(csv_path)
+                    # Kiểm tra nếu file bị recreate (size giảm)
+                    if current_size < last_size:
+                        print(f"Debug: CSV file recreated (size: {last_size} -> {current_size}), resetting offset")
+                        offset = 0
+                    last_size = current_size
+                    
+                    if current_size > offset:
+                        with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
+                            f.seek(offset)
+                            new_data = f.read()
+                            new_offset = f.tell()
+                            
+                            if new_offset > offset:
+                                offset = new_offset
+                                lines = [l for l in new_data.splitlines() if l.strip()]
+                                if lines:
+                                    process_lines(lines)
+                except Exception as e:
+                    print(f"⚠️ Error in polling mode: {e}")
             time.sleep(1.0)
     else:
         print("Debug: Running with watchdog file observer")
