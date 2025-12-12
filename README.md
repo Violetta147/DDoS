@@ -12,22 +12,12 @@ python train_lite_model.py
 **Output**: `models/cnn_lite_model.h5`, `models/cnn_lite_scaler.pkl`, `models/cnn_lite_feature_names.pkl`
 
 ### 2. Capture Traffic (Sniffer)
-**Option A - Fast Sniffer (Raw Socket, cần Admin):**
+- Fast Sniffer (Raw Socket, cần Admin):**
 ```bash
 python gui_fast_sniffer.py
 ```
-- Chỉnh interface trong code
-- Nhanh hơn nhưng cần quyền Admin trên Windows
-
-**Option B - Scapy Sniffer (không cần Admin):**
-```bash
-python gui_sniffer_final.py
-```
 - Chọn interface → Click START
-- Chậm hơn nhưng không cần Admin
-
-**Output**: `data/live_flow.csv`
-
+- Nhanh nhưng cần quyền Admin trên Windows
 ### 3. Detection System
 ```bash
 python lite_detection_system.py --csv-path data/live_flow.csv
@@ -62,8 +52,7 @@ python tcp_flood_pro.py --target 192.168.1.111 --port 8080 --duration 60 --worke
 
 - **Quyền Admin**: `gui_fast_sniffer.py` cần quyền Admin trên Windows
 - **Dependencies**: `pip install -r requirements.txt`
-- **Calibration**: Sniffer sử dụng calibration để amplify signals cho model
-- **Pure AI Mode**: Detection system hiện chỉ dùng AI (đã tắt High Rate Rule)
+- **Pure AI Mode**: Detection system hiện chỉ dùng AI (đã tắt High Rate Rule bằng comment)
 
 ## 🔧 Troubleshooting
 
