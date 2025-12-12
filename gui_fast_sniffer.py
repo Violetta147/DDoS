@@ -118,7 +118,7 @@ def get_local_ips(use_cache: bool = True) -> List[str]:
     except Exception:
         pass
     
-    result = list(set(ips))  # Remove duplicates
+    result = list(dict.fromkeys(ips))  # Remove duplicates while keeping order
     _local_ips_cache = result
     _local_ips_cache_time = time.time()
     return result.copy()
@@ -532,4 +532,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = App(root)
     root.mainloop()
-

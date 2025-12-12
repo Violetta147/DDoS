@@ -266,12 +266,17 @@ def run_watcher(csv_path: str, batch_size: int, poll: bool, model, scaler, featu
                             f.seek(offset)
                             new_data = f.read()
                             new_offset = f.tell()
-                            
+
                             if new_offset > offset:
-                                offset = new_offset
                                 lines = [l for l in new_data.splitlines() if l.strip()]
-                                if lines:
-                                    process_lines(lines)
+                                try:
+                                    if lines:
+                                        process_lines(lines)
+                                except Exception as exc:  # noqa: BLE001
+                                    # Advance offset even when processing fails to avoid reprocessing bad data
+                                    print(f"⚠️ Error processing lines at offset {offset}: {exc}")
+                                finally:
+                                    offset = new_offset
                 except Exception as e:
                     print(f"⚠️ Error in polling mode: {e}")
             time.sleep(1.0)
