@@ -16,7 +16,7 @@ python train_lite_model.py
 ```bash
 python gui_fast_sniffer.py
 ```
-- Chọn IP interface → Click START
+- Chỉnh interface trong code
 - Nhanh hơn nhưng cần quyền Admin trên Windows
 
 **Option B - Scapy Sniffer (không cần Admin):**
