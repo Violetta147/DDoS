@@ -191,7 +191,8 @@ def explore_data(df_features: pd.DataFrame, labels: np.ndarray):
     n_rows = (n_features + n_cols - 1) // n_cols
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 4 * n_rows))
-    axes = axes.flatten() if n_rows > 1 else [axes] if n_rows == 1 else []
+    # Fix: np.atleast_1d handles single Axes, 1D array, and 2D array cases correctly
+    axes = np.atleast_1d(axes).flatten()
     
     for idx, col in enumerate(df_features.columns):
         ax = axes[idx] if idx < len(axes) else None
