@@ -2,6 +2,7 @@
 .env
 .cursor
 /notes/*.txt
+/notes/*.pdf
 /archive/*
 __pycache__/
 /data/*.csv

@@ -221,23 +221,27 @@ def run_watcher(csv_path: str, batch_size: int, poll: bool, model, scaler, featu
             # Predict tất cả flows cùng lúc (batch inference)
             preds, proba = infer_dataframe(df_new)
             
-            # Xử lý từng flow trong batch
-            for i, p in enumerate(preds):
+            # Hybrid Detection: Xử lý từng flow trong batch với 3 quy tắc
+            for i in range(len(df_new)):
                 # Lấy số gói tin từ dataframe
                 pkt_count = df_new.iloc[i]['Total Fwd Packets']
-                is_ai = p == 1
+                ai_proba = proba[i]
                 
-                if is_ai:
-                    # Nếu AI phát hiện (proba > 0.5)
-                    print(f"{Fore.RED}🚨 DDoS DETECTED! (AI Model) - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
+                # Quy tắc 1: Low Traffic Filter (< 100 packets)
+                if pkt_count < 100:
+                    print(f"{Fore.GREEN}✅ Normal (Low Traffic) - Pkts: {pkt_count:.0f} - Proba: {ai_proba:.4f}{Style.RESET_ALL}")
+                
+                # Quy tắc 2: High Rate Rule (> 5000 packets)
+                elif pkt_count > 5000:
+                    print(f"{Fore.RED}🚨 DDoS DETECTED! (High Rate Rule) - Pkts: {pkt_count:.0f} - Proba: {ai_proba:.4f}{Style.RESET_ALL}")
+                
+                # Quy tắc 3: AI Verification (100 <= packets <= 5000)
                 else:
-                    # Nếu AI không phát hiện, kiểm tra lưu lượng
-                    if pkt_count > 2000:
-                        # Lưu lượng cao bất thường nhưng AI bỏ sót -> Cảnh báo VÀNG
-                        print(f"{Fore.YELLOW}⚠️ Normal? (AI Missed) - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
+                    # Nâng ngưỡng tin cậy: chỉ báo DDoS nếu proba > 0.8
+                    if ai_proba > 0.8:
+                        print(f"{Fore.RED}🚨 DDoS DETECTED! (AI Model) - Pkts: {pkt_count:.0f} - Proba: {ai_proba:.4f}{Style.RESET_ALL}")
                     else:
-                        # Lưu lượng thấp, AI báo Normal -> Mọi thứ ổn
-                        print(f"{Fore.GREEN}✅ Normal - Pkts: {pkt_count:.0f} - Proba: {proba[i]:.4f}{Style.RESET_ALL}")
+                        print(f"{Fore.GREEN}✅ Normal - Pkts: {pkt_count:.0f} - Proba: {ai_proba:.4f}{Style.RESET_ALL}")
         except Exception as exc:  # noqa: BLE001
             print(f"⚠️ Error processing batch ({len(local_lines)} lines): {exc}")
             import traceback
