@@ -7,3 +7,7 @@
 __pycache__/
 /models/*.pkl
 /models/*.h5
+/vibe/*
+/data/UNSW-NB15_training-set.csv
+/data/UNSW-NB15_testing-set.csv
+howto.md 
