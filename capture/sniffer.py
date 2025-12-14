@@ -167,7 +167,8 @@ class FastSniffer:
             with self.lock:
                 is_new_flow = flow_key not in self.flows
                 if is_new_flow:
-                    self.flows[flow_key] = Flow(now, flow_src_addr, flow_dst_addr, flow_src_port, flow_dst_port, protocol)
+                    # Activity timeout: 1 second = 1,000,000 microseconds (CICFlowMeter default)
+                    self.flows[flow_key] = Flow(now, flow_src_addr, flow_dst_addr, flow_src_port, flow_dst_port, protocol, activity_timeout=1_000_000)
                     if len(self.flows) <= 10:
                         print(f"🆕 New flow: {flow_src_addr}:{flow_src_port} -> {flow_dst_addr}:{flow_dst_port} "
                               f"(protocol={protocol}, total flows={len(self.flows)})", file=sys.stderr)
@@ -188,8 +189,9 @@ class FastSniffer:
                             flow.is_terminated = True
                             should_flush_now = True
                 
-                # Sử dụng total_len (bao gồm cả IP header) thay vì payload_len
-                flow.update(total_len, header_len, now, is_forward, tcp_flags=tcp_flags_for_update)
+                # Calculate payload length (CICFlowMeter compatible: payload bytes only)
+                payload_len = total_len - header_len
+                flow.update(payload_len, header_len, now, is_forward, tcp_flags=tcp_flags_for_update)
                 
                 # Flush ngay lập tức nếu flow terminated (event-driven, chuyên nghiệp)
                 if should_flush_now:
@@ -231,8 +233,11 @@ class FastSniffer:
             # Log large flows
             total_pkts = flow.fwd_pkts + flow.bwd_pkts
             if total_pkts > 10:
+                # Flow Duration is in microseconds, convert to seconds for display
+                duration_us = feat.get('Flow Duration', 0)
+                duration_s = duration_us / 1_000_000.0
                 print(f"🔍 Flushed flow: {flow.src_addr}:{flow.src_port} -> {flow.dst_addr}:{flow.dst_port} "
-                      f"({total_pkts} pkts, {feat.get('Flow Duration', 0):.2f}s) {reason}", file=sys.stderr)
+                      f"({total_pkts} pkts, {duration_s:.2f}s) {reason}", file=sys.stderr)
             
             return True
         except Exception as e:

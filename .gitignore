@@ -10,4 +10,7 @@ __pycache__/
 /vibe/*
 /data/UNSW-NB15_training-set.csv
 /data/UNSW-NB15_testing-set.csv
+/data/*.csv
 howto.md 
+/code samples/*
+/notes/*.html

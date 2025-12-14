@@ -27,7 +27,95 @@ def init_feature_names():
     dummy_flow.last_time = dummy_flow.start_time + 0.001
     
     features = dummy_flow.to_features()
-    FEATURE_NAMES = sorted(list(features.keys()))  # Sort để consistent
+    # Order features according to FlowFeature enum order (not sorted alphabetically)
+    # Protocol (6) first, then Flow Duration (8) through Idle Min (84)
+    feature_order = [
+        "Protocol",  # 6
+        "Flow Duration",  # 8
+        "Total Fwd Packets",  # 9
+        "Total Backward Packets",  # 10
+        "Total Length of Fwd Packets",  # 11
+        "Total Length of Bwd Packets",  # 12
+        "Fwd Packet Length Max",  # 13
+        "Fwd Packet Length Min",  # 14
+        "Fwd Packet Length Mean",  # 15
+        "Fwd Packet Length Std",  # 16
+        "Bwd Packet Length Max",  # 17
+        "Bwd Packet Length Min",  # 18
+        "Bwd Packet Length Mean",  # 19
+        "Bwd Packet Length Std",  # 20
+        "Flow Bytes/s",  # 21
+        "Flow Packets/s",  # 22
+        "Flow IAT Mean",  # 23
+        "Flow IAT Std",  # 24
+        "Flow IAT Max",  # 25
+        "Flow IAT Min",  # 26
+        "Fwd IAT Total",  # 27
+        "Fwd IAT Mean",  # 28
+        "Fwd IAT Std",  # 29
+        "Fwd IAT Max",  # 30
+        "Fwd IAT Min",  # 31
+        "Bwd IAT Total",  # 32
+        "Bwd IAT Mean",  # 33
+        "Bwd IAT Std",  # 34
+        "Bwd IAT Max",  # 35
+        "Bwd IAT Min",  # 36
+        "Fwd PSH Flags",  # 37
+        "Bwd PSH Flags",  # 38
+        "Fwd URG Flags",  # 39
+        "Bwd URG Flags",  # 40
+        "Fwd Header Length",  # 41
+        "Bwd Header Length",  # 42
+        "Fwd Packets/s",  # 43
+        "Bwd Packets/s",  # 44
+        "Packet Length Min",  # 45
+        "Packet Length Max",  # 46
+        "Packet Length Mean",  # 47
+        "Packet Length Std",  # 48
+        "Packet Length Variance",  # 49
+        "FIN Flag Count",  # 50
+        "SYN Flag Count",  # 51
+        "RST Flag Count",  # 52
+        "PSH Flag Count",  # 53
+        "ACK Flag Count",  # 54
+        "URG Flag Count",  # 55
+        "CWR Flag Count",  # 56
+        "ECE Flag Count",  # 57
+        "Down/Up Ratio",  # 58
+        "Average Packet Size",  # 59
+        "Fwd Segment Size Avg",  # 60
+        "Bwd Segment Size Avg",  # 61
+        "Fwd Bytes/Bulk Avg",  # 63 (62 is duplicate)
+        "Fwd Packet/Bulk Avg",  # 64
+        "Fwd Bulk Rate Avg",  # 65
+        "Bwd Bytes/Bulk Avg",  # 66
+        "Bwd Packet/Bulk Avg",  # 67
+        "Bwd Bulk Rate Avg",  # 68
+        "Subflow Fwd Packets",  # 69
+        "Subflow Fwd Bytes",  # 70
+        "Subflow Bwd Packets",  # 71
+        "Subflow Bwd Bytes",  # 72
+        "FWD Init Win Bytes",  # 73
+        "Bwd Init Win Bytes",  # 74
+        "Fwd Act Data Pkts",  # 75
+        "Fwd Seg Size Min",  # 76
+        "Active Mean",  # 77
+        "Active Std",  # 78
+        "Active Max",  # 79
+        "Active Min",  # 80
+        "Idle Mean",  # 81
+        "Idle Std",  # 82
+        "Idle Max",  # 83
+        "Idle Min",  # 84
+        # Additional features for compatibility with older CSV files
+        "Fwd RST Flags",  # Forward RST flags count
+        "Bwd RST Flags",  # Backward RST flags count
+        "ICMP Code",  # ICMP code (0 for TCP/UDP)
+        "ICMP Type",  # ICMP type (0 for TCP/UDP)
+        "Total TCP Flow Time",  # Same as Flow Duration for TCP
+    ]
+    # Filter to only include features that exist in the flow
+    FEATURE_NAMES = [name for name in feature_order if name in features]
     print(f"[DEBUG] Initialized {len(FEATURE_NAMES)} features from Flow.to_features()", file=sys.stderr)
 
 
