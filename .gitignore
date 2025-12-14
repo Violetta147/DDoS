@@ -5,6 +5,5 @@
 /notes/*.pdf
 /archive/*
 __pycache__/
-/data/*.csv
 /models/*.pkl
 /models/*.h5
