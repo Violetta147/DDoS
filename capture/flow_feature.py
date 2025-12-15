@@ -21,8 +21,10 @@ class FlowFeature:
 
         # Calculate flow duration
         duration = (flow.last_time - flow.start_time) * 1_000_000  # Microseconds
-        if duration <= 0:
-            duration = 1.0  # Avoid division by zero
+        if duration < 0:
+            raise ValueError(
+                f"Flow duration is negative ({duration}us): last_time={flow.last_time}, start_time={flow.start_time}"
+            )
 
         # Forward IAT stats
         fwd_iat_total = flow.fwd_iat_stats.get_sum()
