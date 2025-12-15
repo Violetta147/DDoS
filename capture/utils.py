@@ -22,8 +22,10 @@ def init_feature_names():
     
     # Tạo dummy flow để lấy tất cả feature names
     dummy_flow = Flow(time.time(), "192.168.1.1", "192.168.1.2", 12345, 80, 6)  # protocol=6 (TCP)
-    dummy_flow.update(100, 40, time.time(), True, 0)
-    dummy_flow.update(200, 40, time.time() + 0.001, False, 0)
+    now = time.time()
+    # Feature-name init is not a hot path; use primitive update directly.
+    dummy_flow.update_primitives(now, payload_len=100, header_len=40, tcp_flags=0, protocol=6, is_forward=True)
+    dummy_flow.update_primitives(now + 0.001, payload_len=200, header_len=40, tcp_flags=0, protocol=6, is_forward=False)
     dummy_flow.last_time = dummy_flow.start_time + 0.001
     
     features = dummy_flow.to_features()
