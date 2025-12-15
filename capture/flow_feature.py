@@ -207,7 +207,7 @@ class FlowFeature:
             "PSH Flag Count": psh_flag_count,
             "ACK Flag Count": ack_flag_count,
             "URG Flag Count": urg_flag_count,
-            "CWR Flag Count": cwr_flag_count,
+            "CWE Flag Count": cwr_flag_count,
             "ECE Flag Count": ece_flag_count,
             # 58-59. Down/Up Ratio, Average Packet Size
             "Down/Up Ratio": down_up_ratio,

@@ -1,5 +1,6 @@
 import time
-from typing import Dict
+import datetime
+from typing import Dict, Union
 from .statistics import StatisticsAccumulator
 from .flow_feature import FlowFeature
 
@@ -430,9 +431,32 @@ class Flow:
             is_forward=is_forward,
         )
 
-    def to_features(self) -> Dict[str, float]:
-        """Calculate all features matching CICFlowMeter FlowFeature enum order
-        
-        Delegates feature calculation to FlowFeature class for separation of concerns.
+    def to_features(self) -> Dict[str, Union[str, int, float]]:
+        """Calculate all flow fields for CSV export.
+
+        Includes CICFlowMeter-style metadata columns (Flow ID, 5-tuple, Timestamp)
+        plus the numeric feature set calculated by `FlowFeature`.
         """
-        return FlowFeature.calculate(self)
+
+        feat = FlowFeature.calculate(self)
+
+        # CIC-like Flow ID format used by the provided datasets:
+        #   srcIP-dstIP-srcPort-dstPort-proto
+        flow_id = f"{self.src_addr}-{self.dst_addr}-{self.src_port}-{self.dst_port}-{self.protocol}"
+
+        # Timestamp format observed in `data/wednesday.csv`: YYYY-MM-DD HH:MM:SS.ffffff
+        ts = datetime.datetime.fromtimestamp(float(self.start_time))
+        ts_str = ts.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+        meta: Dict[str, Union[str, int, float]] = {
+            "Flow ID": flow_id,
+            "Src IP": str(self.src_addr),
+            "Src Port": int(self.src_port),
+            "Dst IP": str(self.dst_addr),
+            "Dst Port": int(self.dst_port),
+            "Protocol": int(self.protocol),
+            "Timestamp": ts_str,
+        }
+
+        # Do not mutate `feat`; merge into a new dict.
+        return {**meta, **feat}

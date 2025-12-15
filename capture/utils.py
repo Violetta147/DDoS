@@ -112,10 +112,17 @@ def init_feature_names():
     dummy_flow.last_time = dummy_flow.start_time + 0.001
     
     features = dummy_flow.to_features()
-    # Order features according to FlowFeature enum order (not sorted alphabetically)
-    # Protocol (6) first, then Flow Duration (8) through Idle Min (84)
+    # Order columns to match the requested 1..83 CSV schema.
+    # Note: CIC uses "CWR" (Congestion Window Reduced) but some datasets use
+    # the non-standard label "CWE". Per project convention, export as "CWE Flag Count".
     feature_order = [
+        "Flow ID",  # 1
+        "Src IP",  # 2
+        "Src Port",  # 3
+        "Dst IP",  # 4
+        "Dst Port",  # 5
         "Protocol",  # 6
+        "Timestamp",  # 7
         "Flow Duration",  # 8
         "Total Fwd Packets",  # 9
         "Total Backward Packets",  # 10
@@ -164,7 +171,7 @@ def init_feature_names():
         "PSH Flag Count",  # 53
         "ACK Flag Count",  # 54
         "URG Flag Count",  # 55
-        "CWR Flag Count",  # 56
+        "CWE Flag Count",  # 56 (non-standard label for CWR)
         "ECE Flag Count",  # 57
         "Down/Up Ratio",  # 58
         "Average Packet Size",  # 59
