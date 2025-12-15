@@ -21,6 +21,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from io import StringIO
 from typing import Dict, List, Optional, Protocol, Tuple
 
@@ -65,6 +66,9 @@ COLUMN_ALIASES: Dict[str, str] = {
 }
 
 
+DDOS_PROBA_THRESHOLD: float = 0.8
+
+
 def load_model(model_path: str) -> SklearnBinaryClassifier:
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model not found: {model_path}")
@@ -94,11 +98,97 @@ def infer_schema(model: SklearnBinaryClassifier) -> ModelSchema:
 
 
 def read_header(csv_path: str) -> List[str]:
-    header_df = pd.read_csv(csv_path, nrows=0)
-    cols = [str(c).strip() for c in header_df.columns]
-    if not cols:
-        raise ValueError(f"CSV has no columns: {csv_path}")
+    path = Path(csv_path)
+    if not path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    with path.open("r", encoding="utf-8", errors="ignore", newline="") as f:
+        header_line = f.readline()
+
+    if not header_line.strip():
+        raise ValueError(f"CSV header is empty: {csv_path}")
+
+    # Minimal, robust parsing for a plain CSV header.
+    cols = [c.strip() for c in header_line.strip().split(",")]
+    if not cols or any(c == "" for c in cols):
+        raise ValueError(f"CSV header parse failed: {csv_path}")
     return cols
+
+
+@dataclass(frozen=True)
+class TailState:
+    offset: int
+    remainder: str
+    header_cols: Optional[List[str]]
+    last_size: int
+
+
+def init_tail_state(csv_path: str, start_from_beginning: bool) -> TailState:
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    size = os.path.getsize(csv_path)
+    offset = 0 if start_from_beginning else size
+    print(
+        f"Debug: Tail init (start_from_beginning={start_from_beginning}) "
+        f"offset={offset} size={size}"
+    )
+    return TailState(offset=offset, remainder="", header_cols=None, last_size=size)
+
+
+def read_appended_complete_lines(csv_path: str, state: TailState) -> Tuple[TailState, List[str]]:
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    current_size = os.path.getsize(csv_path)
+    offset = state.offset
+    remainder = state.remainder
+    header_cols = state.header_cols
+
+    if current_size < state.last_size:
+        print(
+            f"Debug: CSV truncated/recreated ({state.last_size} -> {current_size}); resetting tail"
+        )
+        offset = 0
+        remainder = ""
+        header_cols = None
+
+    if offset > current_size:
+        print(f"Debug: Offset beyond file size; resetting offset ({offset} -> 0)")
+        offset = 0
+        remainder = ""
+
+    if current_size == offset:
+        return TailState(offset=offset, remainder=remainder, header_cols=header_cols, last_size=current_size), []
+
+    with open(csv_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+        f.seek(offset)
+        new_data = f.read()
+        new_offset = f.tell()
+
+    combined = remainder + new_data
+    if not combined:
+        return TailState(offset=new_offset, remainder="", header_cols=header_cols, last_size=current_size), []
+
+    # Keep only complete lines; hold the last partial line in remainder.
+    parts = combined.splitlines(keepends=True)
+    complete_lines: List[str] = []
+    new_remainder = ""
+    for part in parts:
+        if part.endswith("\n") or part.endswith("\r"):
+            line = part.rstrip("\r\n")
+            if line.strip():
+                complete_lines.append(line)
+        else:
+            new_remainder = part
+
+    next_state = TailState(
+        offset=new_offset,
+        remainder=new_remainder,
+        header_cols=header_cols,
+        last_size=current_size,
+    )
+    return next_state, complete_lines
 
 
 def lines_to_frame(lines: List[str], header_cols: List[str]) -> pd.DataFrame:
@@ -164,18 +254,21 @@ def predict_batch(
     schema: ModelSchema,
     X: pd.DataFrame,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    pred = np.asarray(model.predict(X)).astype(int)
+    if not schema.has_predict_proba:
+        raise ValueError(
+            "predict_proba is required for thresholding but is not available on this model"
+        )
 
-    proba: Optional[np.ndarray] = None
-    if schema.has_predict_proba:
-        p = np.asarray(model.predict_proba(X))
-        if p.ndim != 2:
-            raise ValueError(f"Unexpected predict_proba shape: {p.shape}")
-        if p.shape[1] == 2:
-            proba = p[:, 1]
-        else:
-            proba = p.max(axis=1)
+    p = np.asarray(model.predict_proba(X))
+    if p.ndim != 2:
+        raise ValueError(f"Unexpected predict_proba shape: {p.shape}")
 
+    if p.shape[1] == 2:
+        proba = p[:, 1]
+    else:
+        proba = p.max(axis=1)
+
+    pred = (proba >= DDOS_PROBA_THRESHOLD).astype(int)
     return pred, proba
 
 
@@ -205,6 +298,7 @@ class CSVAppendHandler(FileSystemEventHandler):
         self.offset = 0
         self.file_size = 0
         self.on_lines = on_lines
+        self.remainder = ""
 
     def on_modified(self, event):
         if event.src_path != os.path.abspath(self.csv_path):
@@ -224,6 +318,7 @@ class CSVAppendHandler(FileSystemEventHandler):
             if current_size < self.file_size:
                 print(f"Debug: CSV truncated/recreated ({self.file_size} -> {current_size}); resetting offset")
                 self.offset = 0
+                self.remainder = ""
             self.file_size = current_size
 
             if self.offset > current_size:
@@ -243,10 +338,24 @@ class CSVAppendHandler(FileSystemEventHandler):
             if not new_data.strip():
                 return
 
-            lines = [l for l in new_data.splitlines() if l.strip()]
+            combined = self.remainder + new_data
+            parts = combined.splitlines(keepends=True)
+            lines: List[str] = []
+            new_remainder = ""
+            for part in parts:
+                if part.endswith("\n") or part.endswith("\r"):
+                    line = part.rstrip("\r\n")
+                    if line.strip():
+                        lines.append(line)
+                else:
+                    new_remainder = part
+
+            self.remainder = new_remainder
             if lines:
-                print(f"Debug: Read {len(lines)} new line(s) (offset={self.offset})")
-            self.on_lines(lines)
+                print(
+                    f"Debug: Read {len(lines)} complete line(s) (offset={self.offset} remainder_len={len(self.remainder)})"
+                )
+                self.on_lines(lines)
         except Exception as exc:
             print(f"⚠️ Error reading CSV: {type(exc).__name__}: {exc}")
 
@@ -256,6 +365,7 @@ def run_watcher(
     batch_size: int,
     poll: bool,
     poll_interval_s: float,
+    start_from_beginning: bool,
     model: SklearnBinaryClassifier,
     schema: ModelSchema,
 ) -> None:
@@ -263,6 +373,7 @@ def run_watcher(
         raise FileNotFoundError(f"CSV file not found: {csv_path}")
 
     buffer: List[str] = []
+    tail_state = init_tail_state(csv_path, start_from_beginning)
 
     def process_lines(lines: List[str]) -> None:
         nonlocal buffer
@@ -272,13 +383,26 @@ def run_watcher(
 
     def flush_buffer() -> None:
         nonlocal buffer
+        nonlocal tail_state
         if not buffer:
             return
 
         local_lines = buffer.copy()
         buffer = []
 
-        header_cols = read_header(csv_path)
+        if tail_state.header_cols is None:
+            tail_state = TailState(
+                offset=tail_state.offset,
+                remainder=tail_state.remainder,
+                header_cols=read_header(csv_path),
+                last_size=tail_state.last_size,
+            )
+            print(f"Debug: Loaded CSV header cols={len(tail_state.header_cols)}")
+
+        header_cols = tail_state.header_cols
+        if header_cols is None:
+            raise RuntimeError("Header columns not initialized")
+
         df_new = lines_to_frame(local_lines, header_cols)
         if df_new.empty:
             return
@@ -290,32 +414,22 @@ def run_watcher(
 
     if poll or not HAS_WATCHDOG:
         print("Debug: Running in polling mode")
-        offset = 0
-        last_size = 0
         while True:
-            if os.path.exists(csv_path):
-                current_size = os.path.getsize(csv_path)
-                if current_size < last_size:
-                    print(f"Debug: CSV truncated/recreated ({last_size} -> {current_size}); resetting offset")
-                    offset = 0
-                last_size = current_size
-
-                if current_size > offset:
-                    with open(csv_path, "r", encoding="utf-8", errors="ignore") as f:
-                        f.seek(offset)
-                        new_data = f.read()
-                        new_offset = f.tell()
-
-                    if new_offset > offset:
-                        lines = [l for l in new_data.splitlines() if l.strip()]
-                        if lines:
-                            process_lines(lines)
-                        offset = new_offset
+            tail_state, lines = read_appended_complete_lines(csv_path, tail_state)
+            if lines:
+                print(
+                    f"Debug: Tail read complete_lines={len(lines)} offset={tail_state.offset} "
+                    f"remainder_len={len(tail_state.remainder)}"
+                )
+                process_lines(lines)
 
             time.sleep(poll_interval_s)
     else:
         print("Debug: Running with watchdog observer")
         handler = CSVAppendHandler(csv_path, process_lines)
+        # Initialize handler to tail from desired position.
+        handler.offset = 0 if start_from_beginning else os.path.getsize(csv_path)
+        handler.file_size = os.path.getsize(csv_path)
         observer = Observer()
         observer.schedule(handler, path=os.path.dirname(os.path.abspath(csv_path)) or ".", recursive=False)
         observer.start()
@@ -328,19 +442,108 @@ def run_watcher(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Real-time DDoS Detection System (RandomForest watcher)")
-    parser.add_argument("--csv-path", required=True, help="CSV path produced by sniffer/export")
-    parser.add_argument("--model-path", required=True, help="Path to RandomForest joblib model")
-    parser.add_argument("--batch-size", type=int, required=True, help="Batch size for inference")
+    parser = argparse.ArgumentParser(
+        description="Real-time DDoS Detection System (RandomForest watcher)",
+        epilog=(
+            "Examples:\n"
+            "  python detection_system.py\n"
+            "  python detection_system.py data/live_flow.csv\n"
+            "  python detection_system.py data/live_flow.csv models/random_forest_model.joblib\n"
+            "  python detection_system.py live_flow.csv random_forest_model.joblib 50 1 --poll\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # Positional args (friendly)
+    # NOTE: Use distinct dest names to avoid clobbering the flag args.
+    parser.add_argument("csv_path_pos", nargs="?", help="CSV path (default: data/live_flow.csv)")
+    parser.add_argument(
+        "model_path_pos",
+        nargs="?",
+        help="Model path (default: models/random_forest_model.joblib)",
+    )
+    parser.add_argument("batch_size_pos", nargs="?", type=int, help="Batch size (default: 1)")
+    parser.add_argument(
+        "poll_interval_s_pos",
+        nargs="?",
+        type=float,
+        help="Polling interval seconds (default: 1)",
+    )
+
+    # Flag args (explicit)
+    parser.add_argument("--csv-path", dest="csv_path_opt", default=None, help="CSV path produced by sniffer/export")
+    parser.add_argument("--model-path", dest="model_path_opt", default=None, help="Path to RandomForest joblib model")
+    parser.add_argument("--batch-size", dest="batch_size_opt", default=None, type=int, help="Batch size for inference")
     parser.add_argument("--poll", action="store_true", help="Force polling mode instead of watchdog")
-    parser.add_argument("--poll-interval-s", type=float, required=True, help="Polling interval in seconds")
+    parser.add_argument(
+        "--from-start",
+        action="store_true",
+        help="Process existing rows from the beginning (default: start at end and only process new appended rows)",
+    )
+    parser.add_argument(
+        "--poll-interval-s",
+        dest="poll_interval_s_opt",
+        default=None,
+        type=float,
+        help="Polling interval in seconds",
+    )
     args, unknown = parser.parse_known_args()
     if unknown:
         print(f"Debug: Ignoring unknown args (likely from Jupyter/IPython): {unknown}")
 
-    model = load_model(args.model_path)
+    def resolve_existing_path(path_value: str, fallback_dir: str) -> str:
+        path_str = str(path_value).strip()
+        if not path_str:
+            raise ValueError("Empty path")
+
+        if os.path.exists(path_str):
+            return path_str
+
+        alt = os.path.join(fallback_dir, path_str)
+        if os.path.exists(alt):
+            print(f"Debug: Resolved path '{path_str}' -> '{alt}'")
+            return alt
+
+        raise FileNotFoundError(f"Path not found: {path_str} (also tried: {alt})")
+
+    default_csv = os.path.join("data", "live_flow.csv")
+    default_model = os.path.join("models", "random_forest_model.joblib")
+
+    csv_path_value = (
+        args.csv_path_opt
+        if args.csv_path_opt is not None
+        else (args.csv_path_pos if args.csv_path_pos is not None else default_csv)
+    )
+    model_path_value = (
+        args.model_path_opt
+        if args.model_path_opt is not None
+        else (args.model_path_pos if args.model_path_pos is not None else default_model)
+    )
+    batch_size_value = (
+        int(args.batch_size_opt)
+        if args.batch_size_opt is not None
+        else (int(args.batch_size_pos) if args.batch_size_pos is not None else 1)
+    )
+    poll_interval_value = (
+        float(args.poll_interval_s_opt)
+        if args.poll_interval_s_opt is not None
+        else (float(args.poll_interval_s_pos) if args.poll_interval_s_pos is not None else 1.0)
+    )
+
+    csv_path = resolve_existing_path(csv_path_value, "data")
+    model_path = resolve_existing_path(model_path_value, "models")
+
+    model = load_model(model_path)
     schema = infer_schema(model)
-    run_watcher(args.csv_path, args.batch_size, args.poll, args.poll_interval_s, model, schema)
+    run_watcher(
+        csv_path,
+        batch_size_value,
+        args.poll,
+        poll_interval_value,
+        bool(args.from_start),
+        model,
+        schema,
+    )
 
 
 if __name__ == "__main__":
