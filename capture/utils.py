@@ -5,6 +5,89 @@ from typing import List, Tuple
 import ipaddress
 from .flow import Flow
 
+
+_ANSI_RESET = "\x1b[0m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_CYAN = "\x1b[36m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_WHITE = "\x1b[37m"
+
+
+def _format_hhmmss_us(ts: float) -> str:
+    local = time.localtime(ts)
+    us = int((ts - int(ts)) * 1_000_000)
+    return (
+        f"{local.tm_hour:02d}:{local.tm_min:02d}:{local.tm_sec:02d}."
+        f"{us:06d}"
+    )
+
+
+def _tcp_flags_to_names(tcp_flags: int) -> List[str]:
+    names: List[str] = []
+    if tcp_flags & 0x02:
+        names.append("SYN")
+    if tcp_flags & 0x10:
+        names.append("ACK")
+    if tcp_flags & 0x01:
+        names.append("FIN")
+    if tcp_flags & 0x04:
+        names.append("RST")
+    if tcp_flags & 0x08:
+        names.append("PSH")
+    if tcp_flags & 0x20:
+        names.append("URG")
+    if tcp_flags & 0x40:
+        names.append("ECE")
+    if tcp_flags & 0x80:
+        names.append("CWR")
+    return names
+
+
+def print_wireshark_style(
+    no: int,
+    ts: float,
+    src_ip: str,
+    src_port: int,
+    dst_ip: str,
+    dst_port: int,
+    proto: int,
+    payload_len: int,
+    flags: int,
+) -> None:
+    """Print one-line packet summary (Wireshark/tshark-like) for debug.
+
+    This is intentionally separate from the hot path.
+    """
+    if proto == 6:
+        proto_name = "TCP"
+        color = _ANSI_GREEN
+        info = ", ".join(_tcp_flags_to_names(flags))
+        info_col = f"[{info}]" if info else "[.]"
+    elif proto == 17:
+        proto_name = "UDP"
+        color = _ANSI_CYAN
+        info_col = "[.]" if flags == 0 else f"[0x{flags:02x}]"
+    else:
+        proto_name = str(proto)
+        color = _ANSI_YELLOW
+        info_col = "[.]" if flags == 0 else f"[0x{flags:02x}]"
+
+    time_col = _format_hhmmss_us(ts)
+    src_col = f"{src_ip}:{src_port}"
+    dst_col = f"{dst_ip}:{dst_port}"
+    addr_col = f"{src_col} -> {dst_col}"
+
+    # Fixed-width columns (tshark-like): No | Time | Source -> Dest | Proto | Len | Info
+    line = (
+        f"{no:>6d} "
+        f"{time_col:<15} "
+        f"{addr_col:<45} "
+        f"{proto_name:<4} "
+        f"{payload_len:>5d} "
+        f"{info_col}"
+    )
+    print(f"{color}{line}{_ANSI_RESET}", file=sys.stderr, flush=True)
+
 # FEATURE_NAMES sẽ được tạo tự động từ Flow.to_features()
 FEATURE_NAMES = None
 

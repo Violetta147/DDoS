@@ -20,7 +20,7 @@ _CLEANUP_INTERVAL_S = 10.0
 
 class FastSniffer:
     """Fast Sniffer sử dụng raw socket (nhanh hơn Scapy)"""
-    def __init__(self, bind_ip, csv_file: str = CSV_FILE):
+    def __init__(self, bind_ip, csv_file: str = CSV_FILE, debug_print: bool = False, stats: bool = False):
         self.bind_ip = bind_ip
         self.flows = {}  # Key: (src_ip_int, dst_ip_int, sport, dport, proto)
         self.lock = threading.Lock()
@@ -31,6 +31,8 @@ class FastSniffer:
         self._recv_buffer = bytearray(65535)
         self._recv_view = memoryview(self._recv_buffer)
         self._scratch = PacketScratch()
+        self._debug_print = debug_print
+        self._stats = stats
 
     def start(self):
         """Khởi động sniffer với raw socket"""
@@ -83,14 +85,54 @@ class FastSniffer:
         # Thread ghi CSV định kỳ
         threading.Thread(target=self._flush_loop, daemon=True).start()
 
+        stats_last_ts = time.monotonic()
+        stats_pkts = 0
+        stats_bytes = 0
+        stats_proc_ns_total = 0
+        stats_proc_samples = 0
+
         # Capture Loop
         while self.running:
             try:
                 nbytes = self.sniffer_socket.recv_into(self._recv_buffer)
                 if nbytes <= 0:
                     continue
+
+                start_ns = 0
+                if self._stats:
+                    start_ns = time.perf_counter_ns()
+
                 self._process_packet(self._recv_view[:nbytes])
                 self.packet_count += 1
+
+                if self._stats:
+                    stats_pkts += 1
+                    stats_bytes += nbytes
+                    end_ns = time.perf_counter_ns()
+                    stats_proc_ns_total += (end_ns - start_ns)
+                    stats_proc_samples += 1
+
+                    now_mono = time.monotonic()
+                    if now_mono - stats_last_ts >= 1.0:
+                        interval_s = now_mono - stats_last_ts
+                        pps = stats_pkts / interval_s if interval_s > 0 else 0.0
+                        mbps = (stats_bytes * 8.0) / (interval_s * 1_000_000.0) if interval_s > 0 else 0.0
+                        avg_us = (
+                            (stats_proc_ns_total / stats_proc_samples) / 1_000.0
+                            if stats_proc_samples > 0
+                            else 0.0
+                        )
+                        with self.lock:
+                            flows_count = len(self.flows)
+                        print(
+                            f"[STATS] pps={pps:,.0f}  mbps={mbps:,.2f}  avg_proc_us={avg_us:,.2f}  flows={flows_count}",
+                            file=sys.stderr,
+                        )
+                        stats_last_ts = now_mono
+                        stats_pkts = 0
+                        stats_bytes = 0
+                        stats_proc_ns_total = 0
+                        stats_proc_samples = 0
             except socket.timeout:
                 # Timeout is normal, continue
                 continue
@@ -116,6 +158,21 @@ class FastSniffer:
         try:
             parse_ipv4_tcp_udp_into(buffer, self._scratch)
 
+            now = time.time()
+
+            if self._debug_print:
+                utils.print_wireshark_style(
+                    no=self.packet_count + 1,
+                    ts=now,
+                    src_ip=socket.inet_ntoa(self._scratch.src_ip_bytes),
+                    src_port=self._scratch.src_port,
+                    dst_ip=socket.inet_ntoa(self._scratch.dst_ip_bytes),
+                    dst_port=self._scratch.dst_port,
+                    proto=self._scratch.protocol,
+                    payload_len=self._scratch.payload_len,
+                    flags=self._scratch.tcp_flags,
+                )
+
             if self._scratch.src_ip_int < self._scratch.dst_ip_int or (
                 self._scratch.src_ip_int == self._scratch.dst_ip_int and self._scratch.src_port < self._scratch.dst_port
             ):
@@ -130,7 +187,6 @@ class FastSniffer:
                 is_forward = False
 
             flow_key = (flow_src_ip_int, flow_dst_ip_int, flow_src_port, flow_dst_port, self._scratch.protocol)
-            now = time.time()
 
             # Determine termination flags without allocating objects
             tcp_flags = self._scratch.tcp_flags

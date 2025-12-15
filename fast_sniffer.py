@@ -13,15 +13,17 @@ def main():
     if len(sys.argv) < 2:
         local_ips = get_local_ips()
         if local_ips:
-            print(f"Usage: python {sys.argv[0]} <bind_ip>", file=sys.stderr)
+            print(f"Usage: python {sys.argv[0]} <bind_ip> [--print] [--stats]", file=sys.stderr)
             print(f"Available IPs: {', '.join(local_ips)}", file=sys.stderr)
             print(f"Example: python {sys.argv[0]} {local_ips[0]}", file=sys.stderr)
         else:
-            print(f"Usage: python {sys.argv[0]} <bind_ip>", file=sys.stderr)
+            print(f"Usage: python {sys.argv[0]} <bind_ip> [--print] [--stats]", file=sys.stderr)
             print("⚠️ Could not detect any local IPs. Please specify manually.", file=sys.stderr)
         sys.exit(1)
     
     bind_ip = sys.argv[1].strip()
+    debug_print = "--print" in sys.argv[2:]
+    stats = "--stats" in sys.argv[2:]
     
     # Validate IP
     is_valid, error_msg = validate_ip(bind_ip)
@@ -34,7 +36,7 @@ def main():
     init_feature_names()
     
     # Create and start sniffer
-    sniffer = FastSniffer(bind_ip)
+    sniffer = FastSniffer(bind_ip, debug_print=debug_print, stats=stats)
     
     try:
         sniffer.start()
