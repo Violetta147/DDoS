@@ -2,6 +2,13 @@ import socket
 import sys
 import threading
 import time
+from typing import Optional
+
+try:
+    import pcapy
+except Exception as e:  # pragma: no cover
+    pcapy = None
+    _PCAPY_IMPORT_ERROR = e
 
 from . import utils
 from .csv_writer import CSVWriter
@@ -19,67 +26,158 @@ _CLEANUP_INTERVAL_S = 10.0
 
 
 class FastSniffer:
-    """Fast Sniffer sử dụng raw socket (nhanh hơn Scapy)"""
+    """Fast Sniffer sử dụng libpcap (pcapy-ng) để capture tốc độ cao."""
     def __init__(self, bind_ip, csv_file: str = CSV_FILE, debug_print: bool = False, stats: bool = False):
+        # Backward-compatible param name:
+        # - If bind_ip is an IPv4 address: use it as a capture filter (host <ip>)
+        # - Else: treat it as interface name (if it matches a device)
         self.bind_ip = bind_ip
         self.flows = {}  # Key: (src_ip_int, dst_ip_int, sport, dport, proto)
         self.lock = threading.Lock()
         self.running = False
-        self.sniffer_socket = None
+        self.cap = None
+        self.dev = None
+        self._datalink = None
         self.packet_count = 0
         self.csv_writer = CSVWriter(csv_file, buffer_size=500)
-        self._recv_buffer = bytearray(65535)
-        self._recv_view = memoryview(self._recv_buffer)
         self._scratch = PacketScratch()
         self._debug_print = debug_print
         self._stats = stats
 
-    def start(self):
-        """Khởi động sniffer với raw socket"""
-        # Validate IP trước (dùng cache để nhanh hơn)
-        local_ips = utils.get_local_ips(use_cache=True)
-        is_valid, error_msg = utils.validate_ip(self.bind_ip, local_ips=local_ips)
-        if not is_valid:
-            print(f"❌ IP Validation Error: {error_msg}", file=sys.stderr)
-            print("⚠️ Lưu ý: Trên Windows, cần quyền Admin để sử dụng raw socket", file=sys.stderr)
-            return
-        
+    def _probe_device_for_filter(self, dev: str, capture_filter: str) -> int:
+        if pcapy is None:
+            raise RuntimeError("pcapy-ng is not available")
+
+        cap = self._open_pcap(dev)
         try:
-            self.sniffer_socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_IP)
-            self.sniffer_socket.bind((self.bind_ip, 0))
-            self.sniffer_socket.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-            # Set timeout để tránh blocking vô hạn và cho phép kiểm tra running flag
-            self.sniffer_socket.settimeout(1.0)
-            self.sniffer_socket.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+            self._set_filter(cap, capture_filter)
+        except Exception:
+            return 0
+
+        hits = 0
+        # Probe for ~0.75s worst-case (15 * 50ms), only at startup.
+        for _ in range(15):
+            try:
+                header, raw_data = cap.next()
+                if header is None or raw_data is None:
+                    continue
+                if len(raw_data) > 0:
+                    hits += 1
+                    if hits >= 2:
+                        break
+            except Exception:
+                return hits
+
+        return hits
+
+    def _select_device_and_filter(self) -> tuple[str, Optional[str]]:
+        if pcapy is None:
+            raise RuntimeError(
+                f"pcapy-ng is not available: {type(_PCAPY_IMPORT_ERROR).__name__}: {_PCAPY_IMPORT_ERROR}"
+            )
+
+        devs = pcapy.findalldevs()
+        if not devs:
+            raise RuntimeError("No network devices found! (Check Npcap/libpcap installation)")
+
+        # If user passed a device name, use it.
+        if self.bind_ip in devs:
+            return self.bind_ip, None
+
+        # Else treat it as an IPv4 filter.
+        capture_filter: Optional[str] = None
+        try:
+            import ipaddress
+
+            ipaddress.IPv4Address(str(self.bind_ip))
+            capture_filter = f"host {self.bind_ip}"
+        except Exception:
+            capture_filter = None
+
+        if capture_filter is None:
+            return devs[0], None
+
+        # Try to select the correct device for the host filter by probing.
+        best_dev = devs[0]
+        best_hits = -1
+        for dev in devs:
+            try:
+                hits = self._probe_device_for_filter(dev, capture_filter)
+            except Exception:
+                continue
+            if hits > best_hits:
+                best_dev = dev
+                best_hits = hits
+            if best_hits >= 2:
+                break
+
+        return best_dev, capture_filter
+
+    def _open_pcap(self, dev: str) -> object:
+        if pcapy is None:
+            raise RuntimeError("pcapy-ng is not available")
+        # Snaplen=65536, Promisc=1, Timeout=100ms
+        return pcapy.open_live(dev, 65536, 1, 100)
+
+    def _set_filter(self, cap: object, capture_filter: str) -> None:
+        if capture_filter:
+            cap.setfilter(capture_filter)
+
+    def _ipv4_view_from_l2(self, raw_data: bytes, datalink: int) -> memoryview:
+        mv = memoryview(raw_data)
+
+        # DLT_EN10MB (Ethernet) = 1
+        if datalink == 1:
+            if len(mv) < 14:
+                raise ValueError("frame too short for Ethernet")
+            eth_type = (mv[12] << 8) | mv[13]
+            offset = 14
+            # VLAN tag
+            if eth_type == 0x8100:
+                if len(mv) < 18:
+                    raise ValueError("frame too short for VLAN")
+                eth_type = (mv[16] << 8) | mv[17]
+                offset = 18
+            if eth_type != 0x0800:
+                raise ValueError("non-IPv4 ethertype")
+            return mv[offset:]
+
+        # DLT_LINUX_SLL (cooked capture) = 113
+        if datalink == 113:
+            if len(mv) < 16:
+                raise ValueError("frame too short for Linux SLL")
+            proto = (mv[14] << 8) | mv[15]
+            if proto != 0x0800:
+                raise ValueError("non-IPv4 SLL protocol")
+            return mv[16:]
+
+        # DLT_RAW = 12 (already IP)
+        if datalink == 12:
+            return mv
+
+        # DLT_NULL = 0 (loopback), 4-byte family header
+        if datalink == 0:
+            if len(mv) < 4:
+                raise ValueError("frame too short for NULL")
+            return mv[4:]
+
+        # Unknown: try as IP directly.
+        return mv
+
+    def start(self):
+        """Khởi động sniffer với libpcap (pcapy-ng)."""
+        try:
+            self.dev, capture_filter = self._select_device_and_filter()
+            self.cap = self._open_pcap(self.dev)
+            self._datalink = int(self.cap.datalink())
+            if capture_filter:
+                self._set_filter(self.cap, capture_filter)
             self.running = True
-            
-            print(f"🚀 Fast Sniffer started on {self.bind_ip}", file=sys.stderr)
-        except OSError as e:
-            if e.winerror == 10022:  # Invalid argument (0.0.0.0 on Windows)
-                error_msg = (
-                    f"❌ Socket Error: Windows raw socket không hỗ trợ bind 0.0.0.0!\n"
-                    f"Giải pháp: Dùng IP cụ thể: {', '.join(local_ips) if local_ips else 'Xem bằng: ipconfig'}\n"
-                    f"⚠️ Lưu ý: Cần quyền Admin trên Windows!"
-                )
-            elif e.winerror == 10049:  # Address not valid
-                error_msg = (
-                    f"❌ Socket Error: IP '{self.bind_ip}' không hợp lệ!\n"
-                    f"IP có sẵn: {', '.join(local_ips) if local_ips else 'Không tìm thấy'}\n"
-                    f"⚠️ Lưu ý: Cần quyền Admin trên Windows!"
-                )
-            elif e.winerror == 10013:  # Permission denied
-                error_msg = (
-                    f"❌ Permission Error: Không có quyền truy cập raw socket!\n"
-                    f"Giải pháp: Chạy chương trình với quyền Administrator (Right-click → Run as administrator)"
-                )
-            else:
-                error_msg = f"❌ Socket Error: {e}\n⚠️ Cần quyền Admin để sử dụng raw socket trên Windows!"
-            
-            print(error_msg, file=sys.stderr)
-            return
+            print(f"🚀 Sniffing on device: {self.dev}", file=sys.stderr)
+            if capture_filter:
+                print(f"🔎 Filter: {capture_filter}", file=sys.stderr)
         except Exception as e:
-            error_msg = f"❌ Unexpected Error: {e}\n⚠️ Cần quyền Admin để sử dụng raw socket!"
-            print(error_msg, file=sys.stderr)
+            print(f"❌ Pcap init error: {type(e).__name__}: {e}", file=sys.stderr)
             return
 
         # Thread ghi CSV định kỳ
@@ -94,20 +192,30 @@ class FastSniffer:
         # Capture Loop
         while self.running:
             try:
-                nbytes = self.sniffer_socket.recv_into(self._recv_buffer)
-                if nbytes <= 0:
+                header, raw_data = self.cap.next()
+
+                # Timeout returns None
+                if header is None or raw_data is None:
+                    continue
+                if len(raw_data) <= 0:
                     continue
 
                 start_ns = 0
                 if self._stats:
                     start_ns = time.perf_counter_ns()
 
-                self._process_packet(self._recv_view[:nbytes])
+                try:
+                    ip_view = self._ipv4_view_from_l2(raw_data, self._datalink if self._datalink is not None else 0)
+                except Exception:
+                    # Non-IPv4 or unsupported L2 frame
+                    continue
+
+                self._process_packet(ip_view)
                 self.packet_count += 1
 
                 if self._stats:
                     stats_pkts += 1
-                    stats_bytes += nbytes
+                    stats_bytes += len(raw_data)
                     end_ns = time.perf_counter_ns()
                     stats_proc_ns_total += (end_ns - start_ns)
                     stats_proc_samples += 1
@@ -133,20 +241,18 @@ class FastSniffer:
                         stats_bytes = 0
                         stats_proc_ns_total = 0
                         stats_proc_samples = 0
-            except socket.timeout:
-                # Timeout is normal, continue
-                continue
             except Exception as e:
+                # pcapy uses PcapError for driver issues
+                if pcapy is not None and isinstance(e, getattr(pcapy, "PcapError", Exception)):
+                    print(f"❌ Pcap Error: {e}", file=sys.stderr)
+                    break
+
                 # Avoid heavy logging in hot path; keep only first error.
                 if self.packet_count == 0:
                     print(f"⚠️ Capture error: {type(e).__name__}: {e}", file=sys.stderr)
 
         # Cleanup
-        try:
-            self.sniffer_socket.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
-            self.sniffer_socket.close()
-        except:
-            pass
+        self.running = False
 
         try:
             self.csv_writer.close()

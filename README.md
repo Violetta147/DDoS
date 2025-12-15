@@ -59,3 +59,5 @@ python tcp_flood_pro.py --target 192.168.1.111 --port 8080 --duration 60 --worke
 - **Lỗi IP không hợp lệ**: Click "Auto-detect" hoặc "List IPs" trong GUI
 - **Detection đứng**: File CSV được recreate → Detection tự động reset offset
 - **Không có flows**: Kiểm tra network traffic và IP binding
+
+dpkt benchmark later because simple is the best
