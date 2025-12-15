@@ -50,25 +50,43 @@ class FastSniffer:
 
         cap = self._open_pcap(dev)
         try:
-            self._set_filter(cap, capture_filter)
-        except Exception:
-            return 0
-
-        hits = 0
-        # Probe for ~0.75s worst-case (15 * 50ms), only at startup.
-        for _ in range(15):
+            datalink = int(cap.datalink())
             try:
-                header, raw_data = cap.next()
-                if header is None or raw_data is None:
-                    continue
-                if len(raw_data) > 0:
+                self._set_filter(cap, capture_filter)
+            except Exception:
+                return 0
+
+            hits = 0
+            # Probe for ~0.75s worst-case (15 * 50ms), only at startup.
+            for _ in range(15):
+                try:
+                    header, raw_data = cap.next()
+                    if header is None or raw_data is None:
+                        continue
+                    if len(raw_data) <= 0:
+                        continue
+
+                    # Only count IPv4 frames so we don't select a device that
+                    # only sees ARP/LLMNR/broadcast noise.
+                    try:
+                        _ = self._ipv4_view_from_l2(raw_data, datalink)
+                    except Exception:
+                        continue
+
                     hits += 1
                     if hits >= 2:
                         break
-            except Exception:
-                return hits
+                except Exception:
+                    return hits
 
-        return hits
+            return hits
+        finally:
+            try:
+                closer = getattr(cap, "close", None)
+                if callable(closer):
+                    closer()
+            except Exception:
+                pass
 
     def _select_device_and_filter(self) -> tuple[str, Optional[str]]:
         if pcapy is None:
@@ -95,7 +113,50 @@ class FastSniffer:
             capture_filter = None
 
         if capture_filter is None:
-            return devs[0], None
+            # Treat bind_ip as a device selector string (friendly name / partial).
+            selector = str(self.bind_ip).strip()
+            selector_l = selector.lower()
+
+            matches = [d for d in devs if selector_l in d.lower()]
+            if len(matches) == 1:
+                print(f"[DEBUG] Selected device (name match): {matches[0]}", file=sys.stderr)
+                return matches[0], None
+
+            if len(matches) > 1:
+                raise RuntimeError(
+                    "Ambiguous device selector. Matches: " + ", ".join(matches)
+                )
+
+            raise RuntimeError(
+                "Unknown capture device. Provide an IPv4 (to use as host filter) or a device name from pcapy.findalldevs(). "
+                f"Given: {selector}. Available devices: {devs}"
+            )
+
+        # Best-effort: if pcapy-ng exposes device addresses, prefer the device
+        # that actually owns the IPv4 (this matches Windows ipconfig output).
+        findalldevs_ex = getattr(pcapy, "findalldevs_ex", None)
+        if callable(findalldevs_ex):
+            try:
+                ex_devs = findalldevs_ex()
+                for item in ex_devs:
+                    # Expected shape: (name, description, addresses, flags)
+                    if not isinstance(item, (tuple, list)) or len(item) < 3:
+                        continue
+                    name = item[0]
+                    addresses = item[2]
+                    if name not in devs:
+                        continue
+                    if not isinstance(addresses, (tuple, list)):
+                        continue
+                    for addr in addresses:
+                        if not isinstance(addr, dict):
+                            continue
+                        ip = addr.get("addr")
+                        if ip == str(self.bind_ip):
+                            print(f"[DEBUG] Selected device (addr match): {name}", file=sys.stderr)
+                            return name, capture_filter
+            except Exception as e:
+                print(f"[DEBUG] findalldevs_ex failed: {type(e).__name__}: {e}", file=sys.stderr)
 
         # Try to select the correct device for the host filter by probing.
         best_dev = devs[0]
@@ -111,6 +172,7 @@ class FastSniffer:
             if best_hits >= 2:
                 break
 
+        print(f"[DEBUG] Selected device (probe hits={best_hits}): {best_dev}", file=sys.stderr)
         return best_dev, capture_filter
 
     def _open_pcap(self, dev: str) -> object:
