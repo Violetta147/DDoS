@@ -32,12 +32,10 @@ class CSVWriter:
         self._writer: Optional[csv.writer] = None
         self._lock = threading.RLock()
 
-    def _get_feature_names(self) -> List[str]:
-        if utils.FEATURE_NAMES is None:
-            utils.init_feature_names()
-        if utils.FEATURE_NAMES is None:
-            raise RuntimeError("FEATURE_NAMES not initialized")
-        return list(utils.FEATURE_NAMES)
+    def _get_schema(self) -> tuple[List[str], List[str]]:
+        header_style = utils.CSV_HEADER_STYLE
+        header_names, source_keys = utils.get_csv_schema(header_style)
+        return header_names, source_keys
 
     def close(self) -> None:
         """Flush pending rows and close the underlying file handle."""
@@ -62,7 +60,7 @@ class CSVWriter:
                 if self.initialized:
                     return True
 
-                feature_names = self._get_feature_names()
+                header_names, _source_keys = self._get_schema()
 
                 # Ensure directory exists
                 os.makedirs(os.path.dirname(self.csv_file), exist_ok=True)
@@ -70,10 +68,14 @@ class CSVWriter:
                 # Open once and keep handle for lifetime
                 self._file = open(self.csv_file, mode="w", newline="", encoding="utf-8")
                 self._writer = csv.writer(self._file)
-                self._writer.writerow(feature_names)
+                self._writer.writerow(header_names)
 
                 self.initialized = True
-                print(f"📄 CSV initialized: {self.csv_file} ({len(feature_names)} features)", file=sys.stderr)
+                print(
+                    f"📄 CSV initialized: {self.csv_file} "
+                    f"({len(header_names)} features, header_style={utils.CSV_HEADER_STYLE})",
+                    file=sys.stderr,
+                )
                 return True
             except Exception as e:
                 print(f"⚠️ Error initializing CSV: {type(e).__name__}: {e}", file=sys.stderr)
@@ -123,8 +125,8 @@ class CSVWriter:
                 # Calculate features
                 feat = flow.to_features()
 
-                feature_names = self._get_feature_names()
-                row = [feat.get(col, 0) for col in feature_names]
+                _header_names, source_keys = self._get_schema()
+                row = [feat.get(col, 0) for col in source_keys]
 
                 self._buffer.append(row)
                 if len(self._buffer) >= self._buffer_size:
