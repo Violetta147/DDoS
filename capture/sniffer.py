@@ -316,6 +316,27 @@ class FastSniffer:
         # Cleanup
         self.running = False
 
+        # Final flush of remaining flows.
+        # Important for SYN floods: they often never reach FIN/RST and may not
+        # hit timeout before the user stops the capture.
+        try:
+            with self.lock:
+                remaining_flows = list(self.flows.values())
+                self.flows.clear()
+
+            if remaining_flows:
+                if not self.csv_writer.initialized:
+                    self.csv_writer.initialize()
+                for flow in remaining_flows:
+                    self.csv_writer.write_flow(flow, "[Shutdown flush]")
+                self.csv_writer.flush()
+                print(
+                    f"[DEBUG] Shutdown flush wrote {len(remaining_flows)} remaining flows.",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"⚠️ Shutdown flush failed: {type(e).__name__}: {e}", file=sys.stderr)
+
         try:
             self.csv_writer.close()
         except Exception:
