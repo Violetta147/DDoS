@@ -272,14 +272,23 @@ def prepare_features(
 ) -> pd.DataFrame:
     df_work = df_in.copy()
 
+    # Make aliasing header-style agnostic by also allowing reverse mappings.
+    # Example:
+    #   long_name <- short_name  (existing mapping)
+    #   short_name <- long_name  (reverse mapping)
+    alias_pairs: Dict[str, str] = dict(column_aliases)
+    for expected, actual in list(column_aliases.items()):
+        if actual not in alias_pairs:
+            alias_pairs[actual] = expected
+
     # Apply aliases transitively (create expected columns from available ones).
     # Some models use different naming conventions where aliases can be chained:
     #   A <- B <- C
     # We iterate until no new columns are created (or until bounded by alias count).
-    max_passes = max(len(column_aliases), 1)
+    max_passes = max(len(alias_pairs), 1)
     for _ in range(max_passes):
         created_any = False
-        for expected, actual in column_aliases.items():
+        for expected, actual in alias_pairs.items():
             if expected not in df_work.columns and actual in df_work.columns:
                 df_work[expected] = df_work[actual]
                 created_any = True
