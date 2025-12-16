@@ -16,8 +16,9 @@ class FlowFeature:
         Returns:
             Dictionary of feature names to values (82 features total)
         """
-        # Finalize active/idle periods before calculation
-        flow._end_active_idle_time(flow.last_time, 60.0)  # Default 60s timeout
+        # Finalize active/idle periods before calculation.
+        # Training-data alignment: CICFlowMeter-derived datasets commonly use a 120s flow timeout.
+        flow._end_active_idle_time(flow.last_time, 120.0)
 
         # Calculate flow duration
         duration = (flow.last_time - flow.start_time) * 1_000_000  # Microseconds
@@ -25,6 +26,10 @@ class FlowFeature:
             raise ValueError(
                 f"Flow duration is negative ({duration}us): last_time={flow.last_time}, start_time={flow.start_time}"
             )
+        # Training-data alignment: some CICFlowMeter-derived datasets use -1 for single-packet/unknown duration.
+        # This avoids producing extreme rates for duration==0.
+        if duration == 0:
+            duration = -1.0
 
         # Forward IAT stats
         fwd_iat_total = flow.fwd_iat_stats.get_sum()
@@ -39,12 +44,27 @@ class FlowFeature:
         bwd_std_iat = flow.bwd_iat_stats.get_std()
         bwd_iat_max = flow.bwd_iat_stats.get_max()
         bwd_iat_min = flow.bwd_iat_stats.get_min()
+        # Training-data alignment: some datasets use -1 as a sentinel when a direction is missing (0 packets).
+        # Keep 0 values when the direction exists but has <2 packets (no IAT samples).
+        if flow.bwd_pkts == 0:
+            bwd_iat_total = -1.0
+            bwd_mean_iat = -1.0
+            bwd_iat_max = -1.0
+            bwd_iat_min = -1.0
+            bwd_std_iat = 0.0
 
         # Flow-level IAT
-        flow_mean_iat = flow.flow_iat_stats.get_mean()
-        flow_std_iat = flow.flow_iat_stats.get_std()
-        flow_iat_max = flow.flow_iat_stats.get_max()
-        flow_iat_min = flow.flow_iat_stats.get_min()
+        flow_iat_count = flow.flow_iat_stats.get_count()
+        if flow_iat_count == 0:
+            flow_mean_iat = -1.0
+            flow_std_iat = 0.0
+            flow_iat_max = -1.0
+            flow_iat_min = -1.0
+        else:
+            flow_mean_iat = flow.flow_iat_stats.get_mean()
+            flow_std_iat = flow.flow_iat_stats.get_std()
+            flow_iat_max = flow.flow_iat_stats.get_max()
+            flow_iat_min = flow.flow_iat_stats.get_min()
 
         total_bytes = flow.fwd_bytes + flow.bwd_bytes  # Payload bytes only
         total_packets = flow.fwd_pkts + flow.bwd_pkts
@@ -104,6 +124,14 @@ class FlowFeature:
         urg_flag_count = flow.fwd_urg_flags + flow.bwd_urg_flags
         cwr_flag_count = flow.fwd_cwr_flags + flow.bwd_cwr_flags
         ece_flag_count = flow.fwd_ece_flags + flow.bwd_ece_flags
+
+        # Compatibility columns expected by some CICFlowMeter-derived datasets/models.
+        # Directional RST flags are directly available in Flow state.
+        fwd_rst_flags = float(flow.fwd_rst_flags)
+        bwd_rst_flags = float(flow.bwd_rst_flags)
+        icmp_code = 0.0
+        icmp_type = 0.0
+        total_tcp_flow_time = float(duration) if int(flow.protocol) == 6 else 0.0
 
         # Rates
         flow_packets_per_s = (total_packets * 1_000_000) / duration if duration > 0 else 0.0
@@ -211,5 +239,11 @@ class FlowFeature:
             "Idle Std": idle_std,
             "Idle Max": idle_max,
             "Idle Min": idle_min,
+
+            "Fwd RST Flags": fwd_rst_flags,
+            "Bwd RST Flags": bwd_rst_flags,
+            "ICMP Code": icmp_code,
+            "ICMP Type": icmp_type,
+            "Total TCP Flow Time": total_tcp_flow_time,
         }
 

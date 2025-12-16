@@ -198,6 +198,13 @@ def init_feature_names():
         "Idle Std",  # 81
         "Idle Max",  # 82
         "Idle Min",  # 83
+
+        # Additional compatibility columns (appended; first 83 columns unchanged)
+        "Fwd RST Flags",  # 84
+        "Bwd RST Flags",  # 85
+        "ICMP Code",  # 86
+        "ICMP Type",  # 87
+        "Total TCP Flow Time",  # 88
     ]
     # Filter to only include features that exist in the flow
     FEATURE_NAMES = [name for name in feature_order if name in features]

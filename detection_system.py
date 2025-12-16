@@ -59,10 +59,19 @@ class ModelSchema:
 
 COLUMN_ALIASES: Dict[str, str] = {
     # model_expected: csv_actual
-    "Total Fwd Packet": "Total Fwd Packets",
-    "Total Bwd packets": "Total Backward Packets",
-    "Total Length of Fwd Packet": "Total Length of Fwd Packets",
-    "Total Length of Bwd Packet": "Total Length of Bwd Packets",
+    "Total Fwd Packet": "Tot Fwd Pkts",
+    "Total Bwd packets": "Tot Bwd Pkts",
+    "Total Length of Fwd Packet": "TotLen Fwd Pkts",
+    "Total Length of Bwd Packet": "TotLen Bwd Pkts",
+
+    "Fwd Packet Length Max": "Fwd Pkt Len Max",
+    "Fwd Packet Length Min": "Fwd Pkt Len Min",
+    "Fwd Packet Length Mean": "Fwd Pkt Len Mean",
+    "Fwd Packet Length Std": "Fwd Pkt Len Std",
+    "Bwd Packet Length Max": "Bwd Pkt Len Max",
+    "Bwd Packet Length Min": "Bwd Pkt Len Min",
+    "Bwd Packet Length Mean": "Bwd Pkt Len Mean",
+    "Bwd Packet Length Std": "Bwd Pkt Len Std",
 
     # Abbreviated (83-col) <-> long names (capture / CIC variants)
     "Total Fwd Packets": "Tot Fwd Pkts",
@@ -263,11 +272,29 @@ def prepare_features(
 ) -> pd.DataFrame:
     df_work = df_in.copy()
 
-    # Apply aliases (create expected columns from available ones)
-    for expected, actual in column_aliases.items():
-        if expected not in df_work.columns and actual in df_work.columns:
-            df_work[expected] = df_work[actual]
-            print(f"Debug: Alias applied: {expected} <- {actual}")
+    # Apply aliases transitively (create expected columns from available ones).
+    # Some models use different naming conventions where aliases can be chained:
+    #   A <- B <- C
+    # We iterate until no new columns are created (or until bounded by alias count).
+    max_passes = max(len(column_aliases), 1)
+    for _ in range(max_passes):
+        created_any = False
+        for expected, actual in column_aliases.items():
+            if expected not in df_work.columns and actual in df_work.columns:
+                df_work[expected] = df_work[actual]
+                created_any = True
+                print(f"Debug: Alias applied: {expected} <- {actual}")
+        if not created_any:
+            break
+
+    # Derive select model features when possible.
+    # Some trained CIC-style datasets include extra convenience columns.
+    if "Total TCP Flow Time" in schema.feature_names and "Total TCP Flow Time" not in df_work.columns:
+        if "Protocol" in df_work.columns and "Flow Duration" in df_work.columns:
+            proto = pd.to_numeric(df_work["Protocol"], errors="coerce")
+            flow_dur = pd.to_numeric(df_work["Flow Duration"], errors="coerce")
+            df_work["Total TCP Flow Time"] = np.where(proto == 6, flow_dur, 0.0)
+            print("Debug: Derived: Total TCP Flow Time <- Flow Duration (TCP only)")
 
     missing = [c for c in schema.feature_names if c not in df_work.columns]
     if missing:
