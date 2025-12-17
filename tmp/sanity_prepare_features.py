@@ -8,7 +8,7 @@ import pandas as pd
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
-from detection_system import COLUMN_ALIASES, ModelSchema, prepare_features
+from archive.detection_system import COLUMN_ALIASES, ModelSchema, prepare_features
 
 
 def main() -> None:

@@ -22,10 +22,18 @@ _CLEANUP_INTERVAL_S = 5.0
 
 
 class FastSniffer:
-    """Attack-aware flow sniffer (SYN-flood safe)"""
+    """Attack-aware flow sniffer (SYN-flood safe, CIC compatible)"""
 
-    def __init__(self, bind_ip=None, iface=None,
-                 csv_file=CSV_FILE, debug_print=False, stats=False):
+    def __init__(
+        self,
+        bind_ip=None,
+        iface=None,
+        csv_file=CSV_FILE,
+        debug_print=False,
+        stats=False,
+    ):
+        if not iface and not bind_ip:
+            raise ValueError("You must specify iface or bind_ip")
 
         self.bind_ip = bind_ip
         self.iface = iface
@@ -44,17 +52,60 @@ class FastSniffer:
         self._debug_print = debug_print
         self._stats = stats
 
-    # ---------------- PCAP ----------------
+    # ================= PCAP =================
 
     def _open_pcap(self, dev):
         return pcapy.open_live(dev, 65536, 1, 100)
+
+    def _ipv4_view_from_l2(self, raw_data: bytes) -> memoryview:
+        """Return an IPv4 view from a captured L2 frame."""
+        mv = memoryview(raw_data)
+        datalink = int(self._datalink) if self._datalink is not None else 0
+
+        # DLT_EN10MB (Ethernet) = 1
+        if datalink == 1:
+            if len(mv) < 14:
+                raise ValueError("frame too short for Ethernet")
+            eth_type = (mv[12] << 8) | mv[13]
+            offset = 14
+            # VLAN tag
+            if eth_type == 0x8100:
+                if len(mv) < 18:
+                    raise ValueError("frame too short for VLAN")
+                eth_type = (mv[16] << 8) | mv[17]
+                offset = 18
+            if eth_type != 0x0800:
+                raise ValueError("non-IPv4 ethertype")
+            return mv[offset:]
+
+        # DLT_LINUX_SLL (cooked capture) = 113
+        if datalink == 113:
+            if len(mv) < 16:
+                raise ValueError("frame too short for Linux SLL")
+            proto = (mv[14] << 8) | mv[15]
+            if proto != 0x0800:
+                raise ValueError("non-IPv4 SLL protocol")
+            return mv[16:]
+
+        # DLT_RAW = 12 (already IP)
+        if datalink == 12:
+            return mv
+
+        # DLT_NULL = 0 (loopback), 4-byte family header
+        if datalink == 0:
+            if len(mv) < 4:
+                raise ValueError("frame too short for NULL")
+            return mv[4:]
+
+        # Unknown: try as IP directly.
+        return mv
 
     def _select_device_and_filter(self):
         devs = pcapy.findalldevs()
         if not devs:
             raise RuntimeError("No capture devices found")
 
-        # 1️⃣ Explicit interface
+        # 1️⃣ Explicit interface (REQUIRED if provided)
         if self.iface:
             for d in devs:
                 if self.iface.lower() in d.lower():
@@ -62,22 +113,17 @@ class FastSniffer:
                     return d, filt
             raise RuntimeError(f"Interface not found: {self.iface}")
 
-        # 2️⃣ bind_ip is device name
+        # 2️⃣ bind_ip is exact device name
         if self.bind_ip and self.bind_ip in devs:
             return self.bind_ip, None
 
-        # 3️⃣ bind_ip is IP → filter
-        try:
-            import ipaddress
-            ipaddress.IPv4Address(self.bind_ip)
-            return devs[0], f"host {self.bind_ip}"
-        except Exception:
-            pass
+        # 3️⃣ bind_ip is IP → must still specify iface
+        raise RuntimeError(
+            "IP filter provided but no interface selected. "
+            "Use --iface <name> together with IP."
+        )
 
-        # 4️⃣ fallback
-        return devs[0], None
-
-    # ---------------- START ----------------
+    # ================= START =================
 
     def start(self):
         try:
@@ -99,7 +145,7 @@ class FastSniffer:
 
         while self.running:
             try:
-                hdr, raw = self.cap.next()
+                _, raw = self.cap.next()
                 if not raw:
                     continue
                 self._process_packet(raw)
@@ -108,21 +154,30 @@ class FastSniffer:
 
         self._shutdown_flush()
 
-    # ---------------- PACKET PROCESS ----------------
+    # ================= PACKET PROCESS =================
 
     def _process_packet(self, raw):
         try:
-            parse_ipv4_tcp_udp_into(raw, self._scratch)
+            ip_view = self._ipv4_view_from_l2(raw)
+            parse_ipv4_tcp_udp_into(ip_view, self._scratch)
+
             now = time.time()
+            proto = self._scratch.protocol
+            tcp_flags = self._scratch.tcp_flags
+
+            if self._debug_print:
+                print(
+                    f"[PKT] {socket.inet_ntoa(self._scratch.src_ip_bytes)}:{self._scratch.src_port} "
+                    f"→ {socket.inet_ntoa(self._scratch.dst_ip_bytes)}:{self._scratch.dst_port} "
+                    f"proto={proto} len={self._scratch.payload_len} flags={tcp_flags}",
+                    file=sys.stderr,
+                )
 
             key = (
                 self._scratch.dst_ip_int,
                 self._scratch.dst_port,
-                self._scratch.protocol,
+                proto,
             )
-
-            tcp_flags = self._scratch.tcp_flags
-            proto = self._scratch.protocol
 
             is_syn_only = (
                 proto == 6 and
@@ -136,36 +191,40 @@ class FastSniffer:
                 flow = self.flows.get(key)
                 if not flow:
                     flow = Flow(
-                        now,
-                        "*",
-                        socket.inet_ntoa(self._scratch.dst_ip_bytes),
-                        0,
-                        self._scratch.dst_port,
-                        proto,
-                        _FLOW_ACTIVITY_TIMEOUT_US,
+                        timestamp=now,
+                        src_ip="*",
+                        dst_ip=socket.inet_ntoa(self._scratch.dst_ip_bytes),
+                        src_port=0,
+                        dst_port=self._scratch.dst_port,
+                        protocol=proto,
+                        activity_timeout=_FLOW_ACTIVITY_TIMEOUT_US,
                     )
                     self.flows[key] = flow
 
                 flow.update_primitives(
-                    now,
-                    self._scratch.payload_len,
-                    self._scratch.header_len,
-                    tcp_flags,
-                    proto,
-                    True,
+                    timestamp=now,
+                    payload_len=self._scratch.payload_len,
+                    header_len=self._scratch.header_len,
+                    tcp_flags=tcp_flags,
+                    protocol=proto,
+                    is_forward=True,
                 )
 
-                if is_syn_only and flow.total_pkts >= _SYN_FLUSH_PKT_THRESHOLD:
+                # SYN flood early flush
+                if is_syn_only and flow.fwd_pkts >= _SYN_FLUSH_PKT_THRESHOLD:
                     flow.is_terminated = True
-                    flow_to_flush = self.flows.pop(key)
+                    flow_to_flush = self.flows.pop(key, None)
 
             if flow_to_flush:
                 self.csv_writer.write_flow(flow_to_flush, "[SYN-FLOOD]")
+                if self._debug_print:
+                    self.csv_writer.flush()
 
-        except Exception:
-            pass
+        except Exception as e:
+            if self._debug_print:
+                print(f"[DEBUG] Packet parse/process failed: {type(e).__name__}: {e}", file=sys.stderr)
 
-    # ---------------- FLUSH LOOP ----------------
+    # ================= FLUSH LOOP =================
 
     def _flush_loop(self):
         self.csv_writer.initialize()
@@ -184,7 +243,7 @@ class FastSniffer:
 
             self.csv_writer.flush()
 
-    # ---------------- SHUTDOWN ----------------
+    # ================= SHUTDOWN =================
 
     def _shutdown_flush(self):
         with self.lock:
@@ -199,3 +258,4 @@ class FastSniffer:
 
     def stop(self):
         self.running = False
+        self._shutdown_flush()

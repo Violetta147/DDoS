@@ -71,7 +71,7 @@ def main() -> None:
     print(f"extra_in_csv_first30: {extra_in_csv[:30]}")
 
     try:
-        from detection_system import COLUMN_ALIASES
+        from archive.detection_system import COLUMN_ALIASES
 
         resolved_cols = _resolve_aliases(set(csv_cols), COLUMN_ALIASES)
         missing_after_alias = [name for name in model_features if name not in resolved_cols]
