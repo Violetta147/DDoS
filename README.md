@@ -48,6 +48,10 @@ python tcp_flood_pro.py --target 192.168.1.111 --port 8080 --duration 60 --worke
 └── tcp_flood_pro.py          # Attack simulator
 ```
 
+## 📑 CICFlowMeter Flow design
+
+- CICFlowMeter Flow class design and metric calculations: [docs/cicflowmeter_flow_design.md](docs/cicflowmeter_flow_design.md)
+
 ## ⚠️ Lưu ý
 
 - **Quyền Admin**: `gui_fast_sniffer.py` cần quyền Admin trên Windows
